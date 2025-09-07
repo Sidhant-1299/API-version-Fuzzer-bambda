@@ -1,0 +1,115 @@
+/**
+ * ApiVersionFuzzer automatically tests an API endpoint across multiple versioned URLs.
+
+ * This fuzzer detects if the URL has a version token (e.g., /v1/) or a placeholder (XXX),
+ * replaces it with versions from minAPIVersion to maxAPIVersion, sends requests concurrently,
+ * collects results in a thread-safe manner, and logs them after all requests complete.
+
+ * Usage:
+ * ApiVersionFuzzer fuzzer = new ApiVersionFuzzer(requestResponse.request());
+ * fuzzer.fuzz();
+ */
+
+class ApiVersionFuzzer {
+
+    private int minAPIVersion = 0;
+    private int maxAPIVersion = 5;
+
+    private HttpRequest originalHttpRequest;
+
+    public ApiVersionFuzzer(HttpRequest request) {
+        this.originalHttpRequest = request;
+    }
+
+    // Helper method: sends a request and returns a log string
+    private String sendAndReturnLog(String url) {
+        HttpRequest sendRequest = HttpRequest.httpRequestFromUrl(url)
+            .withAddedHeaders(originalHttpRequest.headers())
+            .withBody(originalHttpRequest.body());
+
+        HttpResponse res = api().http().sendRequest(sendRequest).response();
+        return "Testing URL: " + url + " -> Status: " + res.statusCode() +
+               ", Length: " + res.bodyToString().length();
+    }
+
+    public void fuzz() {
+        String url = originalHttpRequest.url();
+        Pattern versionPattern = Pattern.compile("([vV])(\\d+)");
+        Matcher detect = versionPattern.matcher(url);
+
+        boolean hasVersion = detect.find();
+        boolean hasXXX = url.toLowerCase().contains("xxx");
+
+        char versionPrefixChar = 'v';
+        if (hasVersion) {
+            versionPrefixChar = detect.group(1).charAt(0); // preserve case
+        }
+
+        logging().logToOutput((hasXXX ? "Payload XXX found. " : "") +
+                "Using '" + versionPrefixChar + "' as version prefix.");
+        logging().logToOutput("Testing versions from " + minAPIVersion + " -> " + maxAPIVersion);
+
+        // Thread-safe list to store logs
+        List<String> logs = Collections.synchronizedList(new ArrayList<>());
+        List<Thread> threads = new ArrayList<>();
+
+        if (hasVersion) {
+            for (int ver = minAPIVersion; ver <= maxAPIVersion; ver++) {
+                final int version = ver;
+                final char versionPrefix = versionPrefixChar;
+                Thread t = new Thread(() -> {
+                    Matcher replacer = versionPattern.matcher(url);
+                    String newURL = replacer.replaceFirst(String.valueOf(versionPrefix) + version);
+                    logs.add(sendAndReturnLog(newURL));
+                });
+                t.start();
+                threads.add(t);
+            }
+
+            Thread tNoVersion = new Thread(() -> {
+                String noVersionURL = url.replaceAll("(?i)/v\\d+", "");
+                logs.add(sendAndReturnLog(noVersionURL));
+            });
+            tNoVersion.start();
+            threads.add(tNoVersion);
+
+        } else if (hasXXX) {
+            for (int ver = minAPIVersion; ver <= maxAPIVersion; ver++) {
+                final int version = ver;
+                final char versionPrefix = versionPrefixChar;
+                Thread t = new Thread(() -> {
+                    String newURL = url.replaceFirst("(?i)xxx", String.valueOf(versionPrefix) + version);
+                    logs.add(sendAndReturnLog(newURL));
+                });
+                t.start();
+                threads.add(t);
+            }
+
+            Thread tNoXXX = new Thread(() -> {
+                String noVersionURL = url.replaceFirst("(?i)/?xxx/?", "/");
+                logs.add(sendAndReturnLog(noVersionURL));
+            });
+            tNoXXX.start();
+            threads.add(tNoXXX);
+
+        } else {
+            logging().logToOutput("No version token and no XXX placeholder found - nothing to test.");
+        }
+
+        // Wait for all threads to complete
+        for (Thread t : threads) {
+            try { t.join(); } catch (InterruptedException e) { e.printStackTrace(); }
+        }
+
+        // Log all results after threads complete
+        for (String logEntry : logs) {
+            logging().logToOutput(logEntry);
+        }
+
+        logging().logToOutput(" All requests completed.");
+    }
+}
+
+// Usage
+ApiVersionFuzzer fuzzer = new ApiVersionFuzzer(requestResponse.request());
+fuzzer.fuzz();
